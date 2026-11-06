@@ -1,0 +1,15 @@
+# Never commit the game's files or anything made from them
+/work/
+/gen/
+/build/
+/third_party/*
+!/third_party/README.md
+*.exe
+*.dll
+*.DLL
+*.zip
+*.bik
+*.ogg
+__pycache__/
+.venv/
+/runtime/shaders/*.spv.h

@@ -1,0 +1,20 @@
+{
+  "$schema": "https://recomp.fyi/schema/v1.json",
+  "game": "Test Drive Off-Road 3",
+  "wikidata": "Q2485696",
+  "system": "PC (Windows)",
+  "type": "recomp",
+  "original": { "revision": "PC CD (1999)", "sha1": "b3aed7e2007acff66e75ef117318192869b1d1eb" },
+  "project": "Test Drive Off-Road 3 native",
+  "status": "playable",
+  "targets": ["Linux"],
+  "toolchain": "1nsane-recompiled",
+  "approach": "Static recompilation of TDOR3.exe, sr.dll and its C runtimes to C, a Windows stand-in on SDL3 and a native Vulkan SurRender driver; checked frame by frame against the original code.",
+  "started": "2026-10-24",
+  "maintainers": [{ "name": "AntAir267", "link": "https://github.com/AntAir267" }],
+  "links": [
+    { "label": "Design notes", "url": "https://github.com/AntAir267/tdor3-native/blob/master/DESIGN.md" }
+  ],
+  "help": ["Testing on other computers and controllers", "Two-player split screen"],
+  "notes": "Alpha: arcade races and World Tour work; played only on the author's own Linux laptop. Bring your own copy of the PC CD; the build checks it and translates the game on your computer. Adds any resolution, widescreen, smooth motion at high refresh rates, controllers with rumble, and an options page in the game's own menu."
+}

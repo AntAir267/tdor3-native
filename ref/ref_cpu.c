@@ -1,0 +1,310 @@
+/* Reference build (forked from 1NSANE's): the original machine code of every module (TDOR3.exe,
+   sr.dll and its plug-ins, MSVCRT, MSVCP60) run by the Unicorn CPU emulator instead of the
+   translated C, on the same runtime. Calls into the runtime (imports, the native display
+   driver's methods) stop the emulator, run the runtime's C code on the shared CPU record, and
+   resume. With --test, TDOR3_PLAIN=1 (the runtime's hooks into the game's own functions off in
+   the translated build, as here) and the same scripted input, build/tdor3_ref and build/tdor3
+   must leave the same memory every frame (tools/lockstep.py).
+
+   Unicorn maps the program's memory directly (the modules as the loader maps them, the arena),
+   so the runtime sees one memory either way. Only Unicorn-private pages (the GDT for fs:, the
+   sentinel the outermost return lands on) live outside it. */
+#define _GNU_SOURCE
+#include <pthread.h>
+#include <stdlib.h>
+#include <unicorn/unicorn.h>
+#include "runtime.h"
+#include "image.h"
+#include "funcs.h"
+
+/* MSVCRT's memory and string routines: the runtime's host versions here too (crt.c), as in the
+   translated build, so the stack bytes they leave behind are the same */
+static const struct { uint32_t at; int (**hook)(CPU *); } crt[] = {
+    {0x780015fd, &hook_crt_memcpy}, {0x78005802, &hook_crt_memmove}, {0x78001000, &hook_crt_memset},
+    {0x7800270e, &hook_crt_strlen}, {0x78002787, &hook_crt_strcpy}, {0x78002dde, &hook_crt_strcat},
+    {0x78010de3, &hook_crt_strncat}, {0x7800511e, &hook_crt_strncpy},
+};
+
+/* rdtsc and cpuid: the runtime's answers (cpuid.c), as the translated code gets them */
+extern const uint32_t cpu_special_addr[];
+extern const uint8_t cpu_special_op[];
+extern const int cpu_special_count;
+
+static void hook_cpu(uc_engine *u, uint64_t addr, uint32_t size, void *ud)
+{
+    uint8_t op = (uint8_t)(uintptr_t)ud;
+    if (op == 0x31) {
+        uint64_t t = cpu_rdtsc();
+        uint32_t lo = (uint32_t)t, hi = (uint32_t)(t >> 32);
+        uc_reg_write(u, UC_X86_REG_EAX, &lo);
+        uc_reg_write(u, UC_X86_REG_EDX, &hi);
+    } else {
+        CPU t;
+        memset(&t, 0, sizeof t);
+        uc_reg_read(u, UC_X86_REG_EAX, &t.eax);
+        uc_reg_read(u, UC_X86_REG_ECX, &t.ecx);
+        cpu_cpuid(&t);
+        uc_reg_write(u, UC_X86_REG_EAX, &t.eax);
+        uc_reg_write(u, UC_X86_REG_EBX, &t.ebx);
+        uc_reg_write(u, UC_X86_REG_ECX, &t.ecx);
+        uc_reg_write(u, UC_X86_REG_EDX, &t.edx);
+    }
+    uint32_t next = (uint32_t)addr + size;
+    uc_reg_write(u, UC_X86_REG_EIP, &next);
+}
+
+static void hook_crt_stop(uc_engine *u, uint64_t addr, uint32_t size, void *ud)
+{
+    (void)addr; (void)size; (void)ud;
+    uc_emu_stop(u);
+}
+
+#define SENTINEL 0x7efe0000u
+#define PRIVATE_BASE 0x7f800000u        /* Unicorn-only page: GDT */
+
+extern const uint32_t x87_special_addr[];
+extern const uint8_t x87_special_op[];
+extern const int x87_special_count;
+
+typedef struct {
+    uc_engine *uc;
+    uint32_t fs_base;                   /* what the fs descriptor currently points at */
+    uint32_t mapped[16];                /* modules mapped into it (their bases) */
+} Engine;
+
+int loader_module_at(int i, uint32_t *base, uint32_t *size);   /* loader.c */
+
+/* modules the loader has mapped since (DLLs load on demand) */
+static void map_modules(Engine *e)
+{
+    uint32_t base, size;
+    for (int i = 0; i < 16 && loader_module_at(i, &base, &size) >= 0; i++) {
+        if (!size || e->mapped[i] == base)
+            continue;
+        uint32_t sz = (size + 0xfff) & ~0xfffu;
+        if (uc_mem_map_ptr(e->uc, base, sz, UC_PROT_ALL, (void *)(uintptr_t)base))
+            fatal("reference build: cannot map the module at %08x into Unicorn", base);
+        e->mapped[i] = base;
+    }
+}
+
+static __thread Engine *eng;
+
+/* x87 tag words per CPU record (the translated build does not track them) */
+#define MAXCPU 64
+static CPU *tag_cpu[MAXCPU];
+static uint16_t tag_val[MAXCPU];
+static pthread_mutex_t tag_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static uint16_t *tag_of(CPU *c)
+{
+    pthread_mutex_lock(&tag_lock);
+    int k;
+    for (k = 0; k < MAXCPU && tag_cpu[k] && tag_cpu[k] != c; k++) {}
+    if (k == MAXCPU) fatal("reference build: too many threads");
+    if (!tag_cpu[k]) {
+        tag_cpu[k] = c;
+        tag_val[k] = 0xffff;
+    }
+    pthread_mutex_unlock(&tag_lock);
+    return &tag_val[k];
+}
+
+/* ------------------------------------------------------------------ x87 transcendentals
+   Unicorn's results differ from real hardware in the last bits: run them on the host. */
+static void hook_x87(uc_engine *u, uint64_t addr, uint32_t size, void *ud)
+{
+    uint8_t op = (uint8_t)(uintptr_t)ud;
+    uint16_t sw, cw, tag;
+    uc_reg_read(u, UC_X86_REG_FPSW, &sw);
+    uc_reg_read(u, UC_X86_REG_FPCW, &cw);
+    uc_reg_read(u, UC_X86_REG_FPTAG, &tag);
+    CPU t;
+    memset(&t, 0, sizeof t);
+    t.ftop = (sw >> 11) & 7;
+    t.fsw = sw & 0x4700;
+    for (int i = 0; i < 8; i++) {
+        uint8_t v[16] = {0};
+        uc_reg_read(u, UC_X86_REG_FP0 + i, v);
+        memcpy(&t.st[i], v, 10);
+    }
+    uint16_t keep_cw = current_cpu() ? current_cpu()->fcw : 0x37f;
+    fpu_setcw(&t, cw);
+    uint32_t top0 = t.ftop;
+    switch (op) {
+    case 0xfe: fpu_fsin(&t); break;
+    case 0xff: fpu_fcos(&t); break;
+    case 0xfb: fpu_fsincos(&t); break;
+    case 0xf2: fpu_fptan(&t); break;
+    case 0xf3: fpu_fpatan(&t); break;
+    case 0xf1: fpu_fyl2x(&t); break;
+    case 0xf9: fpu_fyl2xp1(&t); break;
+    case 0xf0: fpu_f2xm1(&t); break;
+    }
+    fpu_setcw(&t, keep_cw);
+    for (int i = 0; i < 8; i++) {
+        uint8_t v[16] = {0};
+        memcpy(v, &t.st[i], 10);
+        uc_reg_write(u, UC_X86_REG_FP0 + i, v);
+    }
+    if (t.ftop != top0) {
+        if (((top0 - 1) & 7) == t.ftop) tag &= ~(3u << (2 * t.ftop));
+        else tag |= 3u << (2 * top0);
+    }
+    sw = (uint16_t)((sw & ~0x7f00u) | t.fsw | ((t.ftop & 7) << 11));
+    uc_reg_write(u, UC_X86_REG_FPSW, &sw);
+    uc_reg_write(u, UC_X86_REG_FPTAG, &tag);
+    uint32_t next = (uint32_t)addr + size;
+    uc_reg_write(u, UC_X86_REG_EIP, &next);
+}
+
+static bool hook_unmapped(uc_engine *u, uc_mem_type type, uint64_t addr, int size, int64_t value, void *ud)
+{
+    (void)u; (void)type; (void)addr; (void)size; (void)value; (void)ud;
+    return false;                       /* stop: a thunk (runtime call) or a real fault */
+}
+
+/* ------------------------------------------------------------------ engine per host thread */
+static void set_gdt(uc_engine *uc, int index, uint32_t base, uint32_t limit, uint8_t access, uint8_t flags)
+{
+    uint64_t d = (limit & 0xffff) | ((uint64_t)(base & 0xffffff) << 16) | ((uint64_t)access << 40) |
+                 ((uint64_t)((limit >> 16) & 0xf) << 48) | ((uint64_t)flags << 52) | ((uint64_t)(base >> 24) << 56);
+    uc_mem_write(uc, PRIVATE_BASE + 8 * index, &d, 8);
+}
+
+static Engine *engine(void)
+{
+    if (eng)
+        return eng;
+    Engine *e = calloc(1, sizeof *e);
+    if (uc_open(UC_ARCH_X86, UC_MODE_32, &e->uc))
+        fatal("uc_open");
+    uc_engine *uc = e->uc;
+    if (uc_mem_map_ptr(uc, ARENA_START, ARENA_END - ARENA_START, UC_PROT_ALL, (void *)(uintptr_t)ARENA_START) ||
+        uc_mem_map(uc, SENTINEL, 0x1000, UC_PROT_ALL) ||
+        uc_mem_map(uc, PRIVATE_BASE, 0x1000, UC_PROT_READ | UC_PROT_WRITE))
+        fatal("reference build: cannot map memory into Unicorn");
+    uc_hook h;
+    uc_hook_add(uc, &h, UC_HOOK_MEM_FETCH_UNMAPPED | UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED,
+                hook_unmapped, NULL, 1, 0);
+    for (size_t i = 0; i < sizeof crt / sizeof crt[0]; i++)
+        uc_hook_add(uc, &h, UC_HOOK_CODE, hook_crt_stop, NULL, crt[i].at, crt[i].at);
+    for (int i = 0; i < cpu_special_count; i++)
+        uc_hook_add(uc, &h, UC_HOOK_CODE, hook_cpu, (void *)(uintptr_t)cpu_special_op[i],
+                    cpu_special_addr[i], cpu_special_addr[i]);
+    for (int i = 0; i < x87_special_count; i++)
+        uc_hook_add(uc, &h, UC_HOOK_CODE, hook_x87, (void *)(uintptr_t)x87_special_op[i],
+                    x87_special_addr[i], x87_special_addr[i]);
+    /* flat code/data (ring 3), fs -> TEB (set per run), stack (ring 0) */
+    set_gdt(uc, 14, 0, 0xfffff, 0xfb, 0xc);
+    set_gdt(uc, 15, 0, 0xfffff, 0xf3, 0xc);
+    set_gdt(uc, 16, 0, 0xfff, 0xf3, 0x4);
+    set_gdt(uc, 17, 0, 0xfffff, 0x93, 0xc);
+    uc_x86_mmr gdtr = {0, PRIVATE_BASE, 31 * 8 - 1, 0};
+    uc_reg_write(uc, UC_X86_REG_GDTR, &gdtr);
+    int sel;
+    sel = 0x73; uc_reg_write(uc, UC_X86_REG_CS, &sel);
+    sel = 0x7b; uc_reg_write(uc, UC_X86_REG_DS, &sel);
+    sel = 0x7b; uc_reg_write(uc, UC_X86_REG_ES, &sel);
+    sel = 0x88; uc_reg_write(uc, UC_X86_REG_SS, &sel);
+    e->fs_base = 0xffffffffu;
+    eng = e;
+    return e;
+}
+
+static const int regid[8] = {UC_X86_REG_EAX, UC_X86_REG_ECX, UC_X86_REG_EDX, UC_X86_REG_EBX,
+                             UC_X86_REG_ESP, UC_X86_REG_EBP, UC_X86_REG_ESI, UC_X86_REG_EDI};
+
+static void to_uc(Engine *e, CPU *c)
+{
+    uc_engine *uc = e->uc;
+    for (int i = 0; i < 8; i++)
+        uc_reg_write(uc, regid[i], &(&c->eax)[i]);
+    uint32_t fl;
+    uc_reg_read(uc, UC_X86_REG_EFLAGS, &fl);
+    fl = (fl & ~0x400u) | (c->df ? 0x400u : 0) | 2;
+    uc_reg_write(uc, UC_X86_REG_EFLAGS, &fl);
+    if (e->fs_base != c->fs_base) {
+        set_gdt(uc, 16, c->fs_base, 0xfff, 0xf3, 0x4);
+        int sel = 0x83;
+        uc_reg_write(uc, UC_X86_REG_FS, &sel);
+        e->fs_base = c->fs_base;
+    }
+    uint16_t cw = c->fcw, sw = (uint16_t)((c->fsw & 0x4700) | ((c->ftop & 7) << 11)), tag = *tag_of(c);
+    uc_reg_write(uc, UC_X86_REG_FPCW, &cw);
+    uc_reg_write(uc, UC_X86_REG_FPSW, &sw);
+    uc_reg_write(uc, UC_X86_REG_FPTAG, &tag);
+    for (int i = 0; i < 8; i++) {
+        uint8_t v[16] = {0};
+        memcpy(v, &c->st[i], 10);
+        uc_reg_write(uc, UC_X86_REG_FP0 + i, v);
+    }
+}
+
+static void from_uc(Engine *e, CPU *c)
+{
+    uc_engine *uc = e->uc;
+    for (int i = 0; i < 8; i++)
+        uc_reg_read(uc, regid[i], &(&c->eax)[i]);
+    uint32_t fl;
+    uc_reg_read(uc, UC_X86_REG_EFLAGS, &fl);
+    c->df = (fl >> 10) & 1;
+    uint16_t cw, sw, tag;
+    uc_reg_read(uc, UC_X86_REG_FPCW, &cw);
+    uc_reg_read(uc, UC_X86_REG_FPSW, &sw);
+    uc_reg_read(uc, UC_X86_REG_FPTAG, &tag);
+    if (cw != c->fcw)
+        fpu_setcw(c, cw);
+    c->fsw = sw & 0x4700;
+    c->ftop = (sw >> 11) & 7;
+    *tag_of(c) = tag;
+    for (int i = 0; i < 8; i++) {
+        uint8_t v[16] = {0};
+        uc_reg_read(uc, UC_X86_REG_FP0 + i, v);
+        c->st[i] = 0;
+        memcpy(&c->st[i], v, 10);
+    }
+}
+
+/* Run the program from `target` until it returns to the sentinel its caller pushed. */
+static void ref_icall(CPU *c, uint32_t target)
+{
+    Engine *e = engine();
+    map_modules(e);
+    if (R32(c->esp) != SENTINEL)
+        fatal("reference build: call to %08x without a sentinel return address", target);
+    uint32_t pc = target;
+    for (;;) {
+        to_uc(e, c);
+        uc_err err = uc_emu_start(e->uc, pc, SENTINEL, 0, 0);
+        uint32_t eip;
+        uc_reg_read(e->uc, UC_X86_REG_EIP, &eip);
+        from_uc(e, c);
+        if (eip == SENTINEL) {
+            c->ret = SENTINEL;          /* the program's ret already popped it */
+            return;
+        }
+        int done = 0;
+        for (size_t i = 0; i < sizeof crt / sizeof crt[0] && !done; i++)
+            if (eip == crt[i].at && *crt[i].hook && (*crt[i].hook)(c)) {
+                pc = c->ret;             /* (the host version did its ret) */
+                done = 1;
+            }
+        if (done)
+            continue;
+        if (thunk_name(eip)) {
+            /* a call (or jump) into the runtime: the return address is on the stack */
+            if (!call_thunk(c, eip))
+                fatal("reference build: bad thunk %08x", eip);
+            pc = c->ret;
+            map_modules(e);              /* (LoadLibrary may have mapped one) */
+            continue;
+        }
+        fatal("reference build: emulation stopped at %08x: %s", eip, uc_strerror(err));
+    }
+}
+
+__attribute__((constructor)) static void ref_init(void)
+{
+    icall_hook = ref_icall;
+}
