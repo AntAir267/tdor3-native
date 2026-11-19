@@ -776,7 +776,7 @@ API_CDECL(SRDD, srDDGetDeviceCount) { return 1; }
 API_CDECL(SRDD, srDDGetDeviceName) { return driver_name; }
 API_CDECL(SRDD, srDDInitDevice) { return ARG(0) == 0 ? dd_obj : 0; }
 
-static const struct { const char *name; void (*fn)(CPU *c); } exports[] = {
+static const HostExport exports[] = {
     {"srDDGetDriverApiVersion", w_SRDD_srDDGetDriverApiVersion},
     {"srDDGetDriverName", w_SRDD_srDDGetDriverName},
     {"srDDConfigureDriver", w_SRDD_srDDConfigureDriver},

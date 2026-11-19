@@ -226,6 +226,32 @@ Why this split:
   hooks into the game's functions off) and the same scripted keys / controller, compares memory
   every frame and narrows a difference to one runtime call (tools/memdiff.py).
 
+### 9. On AntiStatic (2026-11-12 .. 18)
+- The translator and the Windows stand-in now come from the AntiStatic toolkit, a submodule in
+  third_party/antistatic pinned at a release (the toolkit grew out of this port's runtime and
+  1NSANE's). Deleted: tools/recomp.py and its modules, runtime/main.c, kernel32*, user32, files,
+  sync, mem, dinput, pad, dsound, winmm, advapi32, eh, loader, cpuid and the rest. What stays is
+  TDOR3's own: runtime/port.h (the game's paths, CD label, arena, the machine it sees, the
+  joystick's shape), runtime/port.c (start-up of the port's pieces, the timer seeding, the
+  controller layout as port_pad_send, movie skip by pad, shots, mouse, option help), srdd.c +
+  vk.c, bink.c, music.c, crt.c, scene.c, smooth.c, hud.c, game.c, menus.c, ref/ref_cpu.c.
+- Settings the move needed [verified: hash runs, lockstep]: a Pentium II without MMX (a strong
+  cpu_cpuid: with MMX SurRender loads srVP_PentiumMMX / PentiumII, not in this build config),
+  RDTSC at 400 MHz (PORT_TSC_HZ, the rate the timer calibration is seeded with), one CPU
+  (PORT_CPU_COUNT 1: srTimer, sr.dll 0x100693b0, ORs 0x2000 into the CPU version it keeps when
+  there are more, so with the toolkit's default it re-measured with Sleep(5000) on every start),
+  and a joystick of 4 axes and 8 buttons (PORT_PAD_AXES / PORT_PAD_BUTTONS, as before).
+- The reference build computes fprem / fprem1 on the host as the translator lists them (opcodes
+  0xf8 / 0xf5); skipping them looped MSVCRT's sin/cos argument reduction forever [verified:
+  TDOR3_REF_WATCH found it at 0x78028d5e].
+- Checks against the old port's own runtime [verified 2026-11-13, toolkit v0.2.2-v0.2.4; again on
+  v0.2.38]: screenshots pixel-identical (legal screen, intro, main menu, race start, More Options,
+  Cheat Menu); the player's car identical for the 173 physics steps before the first scripted
+  input, after which the toolkit's test clock lands inputs a step earlier (race time 26.53 vs
+  26.56 s at frame 3590: test runs only); memory hashes differ from frame 1 (another runtime's
+  heap and call counts), so the translation is checked by lockstep on the toolkit runtime:
+  identical on all 3600 frames of the scripted race (menus, 25 s of steering, throttle, brake).
+
 ## Game facts learned
 
 - Boot order (TDOR3.exe WinMain 0x450c2e): Framewerk log (c:\fw_tdor3.log), CD check

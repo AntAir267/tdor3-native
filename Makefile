@@ -1,5 +1,8 @@
 # TDOR3 native: build the runtime and the C generated from the user's own game files.
 #   make GAME=<folder with TDOR3.exe>      translate + build build/tdor3
+# On the AntiStatic toolkit (third_party/antistatic, a pinned release): its translator and runtime
+# core, with this port's own files in runtime/ (port.h, the SurRender driver, its game code).
+AS = third_party/antistatic
 # Python with Capstone: the repository's .venv if there is one
 PY ?= $(firstword $(wildcard .venv/bin/python) python3)
 GAME ?= $(HOME)/.local/share/tdor3-native/game
@@ -17,30 +20,40 @@ else
 SDL3_CFLAGS = $(shell pkg-config --cflags sdl3)
 SDL3_LIBS = $(shell pkg-config --libs sdl3)
 endif
-CFLAGS_COMMON = -std=gnu11 -g -fno-strict-aliasing -frounding-math -fno-omit-frame-pointer -Iruntime -Igen $(SDL3_CFLAGS)
+CFLAGS_COMMON = -std=gnu11 -g -fno-strict-aliasing -frounding-math -fno-omit-frame-pointer -Iruntime -I$(AS)/runtime/win32 -I$(AS)/runtime/cpu -I$(AS)/runtime/rewrite -Igen $(SDL3_CFLAGS)
 CFLAGS_GEN = $(CFLAGS_COMMON) -O2 -w -DCPU_FAST_MEM
 CFLAGS_RT = $(CFLAGS_COMMON) -O2 -Wall -Wextra -Wno-unused-parameter -Wno-format-truncation -Wno-missing-field-initializers
 LDFLAGS = -rdynamic $(SDL3_LIBS) -pthread -lm -ldl -lz -lvulkan $(shell pkg-config --libs libavformat libavcodec libswresample libswscale libavutil)
 
 RT_SRC = $(wildcard runtime/*.c)
 RT_OBJ = $(patsubst runtime/%.c,build/obj/rt_%.o,$(RT_SRC))
+AS_SRC = $(wildcard $(AS)/runtime/win32/*.c) $(AS)/runtime/cpu/fpu.c $(wildcard $(AS)/runtime/rewrite/*.c)
+as_obj = build/obj/as_$(subst /,_,$(patsubst $(AS)/runtime/%.c,%,$(1))).o
+AS_OBJ = $(foreach f,$(AS_SRC),$(call as_obj,$(f)))
 -include gen/files.mk
 GEN_SRC = $(GEN_CODE) gen/table.c gen/stubs.c gen/x87_special.c
 GEN_OBJ = $(patsubst gen/%.c,build/obj/gen_%.o,$(GEN_SRC))
 
 all: build/tdor3
 
-gen/funcs.h: $(wildcard tools/*.py) $(BUILD_CFG)
-	$(PY) tools/recomp.py "$(GAME)" $(BUILD_CFG) gen
+gen/funcs.h: $(wildcard $(AS)/translator/*.py) $(BUILD_CFG)
+	$(PY) $(AS)/translator/recomp.py "$(GAME)" $(BUILD_CFG) gen
 gen/table.c gen/stubs.c gen/x87_special.c gen/image.h: gen/funcs.h ;
 gen/files.mk: gen/funcs.h
 	@echo 'GEN_CODE = $(sort $(wildcard gen/code_*.c))' > $@
 
-build/obj/gen_%.o: gen/%.c gen/funcs.h runtime/cpu.h | build/obj
+build/obj/gen_%.o: gen/%.c gen/funcs.h $(AS)/runtime/cpu/cpu.h | build/obj
 	$(CC) $(CFLAGS_GEN) -c $< -o $@
 
 build/obj/rt_%.o: runtime/%.c runtime/*.h gen/funcs.h | build/obj
 	$(CC) $(CFLAGS_RT) -c $< -o $@
+
+# the toolkit's runtime, its folder in the object's name (as_win32_main.o, as_cpu_fpu.o, ...)
+define AS_RULE
+$(call as_obj,$(1)): $(1) runtime/port.h gen/funcs.h | build/obj
+	$$(CC) $$(CFLAGS_RT) -c $$< -o $$@
+endef
+$(foreach f,$(AS_SRC),$(eval $(call AS_RULE,$(f))))
 
 # Shaders: SPIR-V headers made with glslang, kept in the repository (glslang needed only after a change)
 SHADERS = $(wildcard runtime/shaders/*.vert runtime/shaders/*.frag)
@@ -52,7 +65,7 @@ runtime/shaders/%.spv.h: runtime/shaders/% runtime/shaders/push.glsl
 endif
 build/obj/rt_vk.o: $(SPV_H)
 
-build/tdor3: $(GEN_OBJ) $(RT_OBJ)
+build/tdor3: $(GEN_OBJ) $(RT_OBJ) $(AS_OBJ)
 	$(CC) -o $@ $^ $(LDFLAGS)
 
 build/obj:
@@ -64,7 +77,7 @@ UNICORN ?= $(firstword $(wildcard .venv/lib/python3*/site-packages/unicorn))
 build/obj/ref_cpu.o: ref/ref_cpu.c runtime/*.h gen/funcs.h | build/obj
 	$(CC) $(CFLAGS_RT) -I$(UNICORN)/include -c $< -o $@
 
-build/tdor3_ref: $(GEN_OBJ) $(RT_OBJ) build/obj/ref_cpu.o
+build/tdor3_ref: $(GEN_OBJ) $(RT_OBJ) $(AS_OBJ) build/obj/ref_cpu.o
 	$(CC) -o $@ $^ $(UNICORN)/lib/libunicorn.a $(LDFLAGS) -lrt
 
 clean:

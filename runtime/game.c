@@ -308,7 +308,7 @@ static int joy_label_hook(CPU *c)
 
 static int movie_frame_hook(CPU *c);
 
-void game_init(void)
+void game_hooks_init(void)
 {
     hook_string_lookup = string_lookup_hook;
     hook_joy_label = joy_label_hook;

@@ -5,6 +5,9 @@ Issues and pull requests are welcome. A few rules keep the project possible:
 - **No game files, ever.** Nothing from the game (its code, data, art, sound, movies, text),
   nothing extracted or converted from it, and no generated C from the translator. Addresses,
   hashes and notes on how the game works are fine. Bring your own game to test.
+- **Toolkit changes go to the toolkit.** The translator and the Windows stand-in live in
+  [AntiStatic](https://github.com/AntAir267/AntiStatic-Recomp-Toolkit) (third_party/antistatic);
+  this repository only moves its pin to a newer release.
 - **The checks must pass.** A change to the translator or to anything the game's code runs on
   keeps the reference build identical (`make build/tdor3_ref`, then `tools/lockstep.py` with a
   scripted run; see DESIGN.md, "Testing"). Test with the movies on as well as off.

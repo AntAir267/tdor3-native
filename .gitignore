@@ -4,6 +4,7 @@
 /build/
 /third_party/*
 !/third_party/README.md
+!/third_party/antistatic
 *.exe
 *.dll
 *.DLL

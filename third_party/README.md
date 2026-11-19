@@ -1,3 +1,5 @@
+- antistatic/: the AntiStatic toolkit, a git submodule pinned at a release (`git submodule update --init`).
+
 Third-party sources fetched and built locally (not committed):
 
 - SDL3 (zlib licence), 3.4 or later. If your system has SDL3's development package

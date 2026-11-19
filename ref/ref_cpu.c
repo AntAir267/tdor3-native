@@ -34,7 +34,7 @@ static void hook_cpu(uc_engine *u, uint64_t addr, uint32_t size, void *ud)
 {
     uint8_t op = (uint8_t)(uintptr_t)ud;
     if (op == 0x31) {
-        uint64_t t = cpu_rdtsc();
+        uint64_t t = cpu_rdtsc(NULL);
         uint32_t lo = (uint32_t)t, hi = (uint32_t)(t >> 32);
         uc_reg_write(u, UC_X86_REG_EAX, &lo);
         uc_reg_write(u, UC_X86_REG_EDX, &hi);
@@ -140,6 +140,8 @@ static void hook_x87(uc_engine *u, uint64_t addr, uint32_t size, void *ud)
     case 0xf1: fpu_fyl2x(&t); break;
     case 0xf9: fpu_fyl2xp1(&t); break;
     case 0xf0: fpu_f2xm1(&t); break;
+    case 0xf8: fpu_fprem(&t); break;     /* (the toolkit's translator lists these too: the CRT's */
+    case 0xf5: fpu_fprem1(&t); break;    /*  sin and cos reduce huge arguments with them) */
     }
     fpu_setcw(&t, keep_cw);
     for (int i = 0; i < 8; i++) {
@@ -276,9 +278,14 @@ static void ref_icall(CPU *c, uint32_t target)
     uint32_t pc = target;
     for (;;) {
         to_uc(e, c);
-        uc_err err = uc_emu_start(e->uc, pc, SENTINEL, 0, 0);
+        /* TDOR3_REF_WATCH=1: emulate in 2 s slices, logging where a slice ended (finding a
+           place the emulated code loops without calling the runtime) */
+        static int watch = -1;
+        if (watch < 0) watch = getenv("TDOR3_REF_WATCH") != NULL;
+        uc_err err = uc_emu_start(e->uc, pc, SENTINEL, watch ? 2000000 : 0, 0);
         uint32_t eip;
         uc_reg_read(e->uc, UC_X86_REG_EIP, &eip);
+
         from_uc(e, c);
         if (eip == SENTINEL) {
             c->ret = SENTINEL;          /* the program's ret already popped it */
@@ -298,6 +305,17 @@ static void ref_icall(CPU *c, uint32_t target)
                 fatal("reference build: bad thunk %08x", eip);
             pc = c->ret;
             map_modules(e);              /* (LoadLibrary may have mapped one) */
+            continue;
+        }
+        if (watch && err == UC_ERR_OK) {
+            uint32_t esp, ecx, eax;
+            uc_reg_read(e->uc, UC_X86_REG_ESP, &esp);
+            uc_reg_read(e->uc, UC_X86_REG_ECX, &ecx);
+            uc_reg_read(e->uc, UC_X86_REG_EAX, &eax);
+            LOG(LOG_ALWAYS, "reference: still running at %08x (esp %08x, [esp] %08x, eax %08x, ecx %08x)",
+                eip, esp, R32(esp), eax, ecx);
+            from_uc(e, c);
+            pc = eip;
             continue;
         }
         fatal("reference build: emulation stopped at %08x: %s", eip, uc_strerror(err));
