@@ -27,6 +27,8 @@ LDFLAGS = -rdynamic $(SDL3_LIBS) -pthread -lm -ldl -lz -lvulkan $(shell pkg-conf
 
 RT_SRC = $(wildcard runtime/*.c)
 RT_OBJ = $(patsubst runtime/%.c,build/obj/rt_%.o,$(RT_SRC))
+# the toolkit's headers: every object is rebuilt when a new toolkit release changes one
+AS_H = $(wildcard $(AS)/runtime/win32/*.h $(AS)/runtime/cpu/*.h $(AS)/runtime/rewrite/*.h)
 AS_SRC = $(wildcard $(AS)/runtime/win32/*.c) $(AS)/runtime/cpu/fpu.c $(wildcard $(AS)/runtime/rewrite/*.c)
 as_obj = build/obj/as_$(subst /,_,$(patsubst $(AS)/runtime/%.c,%,$(1))).o
 AS_OBJ = $(foreach f,$(AS_SRC),$(call as_obj,$(f)))
@@ -42,15 +44,15 @@ gen/table.c gen/stubs.c gen/x87_special.c gen/image.h: gen/funcs.h ;
 gen/files.mk: gen/funcs.h
 	@echo 'GEN_CODE = $(sort $(wildcard gen/code_*.c))' > $@
 
-build/obj/gen_%.o: gen/%.c gen/funcs.h runtime/port.h $(wildcard $(AS)/runtime/cpu/*.h) | build/obj
+build/obj/gen_%.o: gen/%.c gen/funcs.h runtime/port.h $(AS_H) | build/obj
 	$(CC) $(CFLAGS_GEN) -c $< -o $@
 
-build/obj/rt_%.o: runtime/%.c runtime/*.h gen/funcs.h | build/obj
+build/obj/rt_%.o: runtime/%.c runtime/*.h $(AS_H) gen/funcs.h | build/obj
 	$(CC) $(CFLAGS_RT) -c $< -o $@
 
 # the toolkit's runtime, its folder in the object's name (as_win32_main.o, as_cpu_fpu.o, ...)
 define AS_RULE
-$(call as_obj,$(1)): $(1) runtime/port.h gen/funcs.h | build/obj
+$(call as_obj,$(1)): $(1) runtime/port.h $(AS_H) gen/funcs.h | build/obj
 	$$(CC) $$(CFLAGS_RT) -c $$< -o $$@
 endef
 $(foreach f,$(AS_SRC),$(eval $(call AS_RULE,$(f))))
@@ -74,7 +76,7 @@ build/obj:
 # Reference build: the original code in Unicorn on the same runtime (ref/ref_cpu.c, tools/lockstep.py).
 # Unicorn: the library in the Python unicorn package (pip install unicorn), in .venv or UNICORN=<its folder>
 UNICORN ?= $(firstword $(wildcard .venv/lib/python3*/site-packages/unicorn))
-build/obj/ref_cpu.o: ref/ref_cpu.c runtime/*.h gen/funcs.h | build/obj
+build/obj/ref_cpu.o: ref/ref_cpu.c runtime/*.h $(AS_H) gen/funcs.h | build/obj
 	$(CC) $(CFLAGS_RT) -I$(UNICORN)/include -c $< -o $@
 
 build/tdor3_ref: $(GEN_OBJ) $(RT_OBJ) $(AS_OBJ) build/obj/ref_cpu.o
