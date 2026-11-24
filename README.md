@@ -13,8 +13,10 @@ The translator and the Windows stand-in come from
 TDOR3's own: the build config, the SurRender display driver, Bink and CD audio, and the game code
 (widescreen, smooth motion, the race HUD, the added menus, the controller layout).
 
-> **Alpha.** Played only on the author's own laptop, and started (not yet played) on a Steam
-> Deck. Expect problems on other computers, and please report them in Issues.
+> **Alpha, and this version is untested.** The current code (on AntiStatic v0.2.46) has only been
+> checked by automated runs: frame by frame against the game's original code through the menus and a
+> scripted race, and by screenshots. Nobody has played it yet. The earlier version was played on the
+> author's own laptop. Expect problems, and please report them in Issues.
 
 **Bring your own game.** This repository holds only the translator and the runtime, never any of
 the game's code or data. You need your own copy of the PC CD version of Test Drive Off-Road 3.
